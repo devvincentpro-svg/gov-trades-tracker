@@ -49,13 +49,13 @@ def _super_investor_score(ticker: str) -> float:
     conn = get_conn()
     try:
         total_investors = conn.execute(
-            "SELECT COUNT(DISTINCT investor) FROM super_holdings"
+            "SELECT COUNT(DISTINCT manager_id) FROM super_holdings"
         ).fetchone()[0]
         if not total_investors:
             conn.close()
             return 0.0
         holding = conn.execute(
-            "SELECT COUNT(DISTINCT investor) FROM super_holdings WHERE ticker = ?",
+            "SELECT COUNT(DISTINCT manager_id) FROM super_holdings WHERE ticker = ?",
             (ticker,)
         ).fetchone()[0]
         conn.close()

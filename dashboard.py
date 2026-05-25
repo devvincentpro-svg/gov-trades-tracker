@@ -9,7 +9,16 @@ from analysis.news_correlation import (
     get_advance_trades, get_politician_timing_stats,
     get_ticker_sentiment_timeline, get_news_for_ticker, get_sentiment_vs_trades
 )
+from analysis.scorer import get_top_signals
 import threading
+
+# IBKR — connexion optionnelle, ne bloque pas si TWS est fermé
+try:
+    from broker.ibkr_client import connect as ibkr_connect, account_summary, get_positions, is_connected
+    from broker.ibkr_orders import get_paper_orders, place_order
+    _IBKR_AVAILABLE = True
+except Exception:
+    _IBKR_AVAILABLE = False
 
 st.set_page_config(
     page_title="Gov Trades Tracker",
@@ -716,6 +725,173 @@ with st.expander("📢 Configuration Twitter / Facebook"):
 **Facebook** — API Graph très restrictive (approbation requise, pages publiques seulement).
 En pratique, le signal Reddit + Google News couvre 95% du bruit social utile.
     """)
+
+# ═══════════════════════════════════════════════════════════
+# IBKR PAPER TRADING — SIGNAUX & PORTEFEUILLE SIMULÉ
+# ═══════════════════════════════════════════════════════════
+st.divider()
+st.header("🏦 IBKR Paper Trading — Signaux & Simulation")
+
+# ── Scoring engine ──
+@st.cache_data(ttl=60)
+def load_signals():
+    return get_top_signals(20)
+
+signals = load_signals()
+
+if signals:
+    st.subheader("🎯 Top signaux politiques scorés")
+    st.caption("Score 0-100 : fiabilité élu (30) + super investisseurs (25) + news sentiment (20) + taille trade (15) + vitesse déclaration (10)")
+
+    sig_df = pd.DataFrame(signals)
+    sig_df["signal_icon"] = sig_df["signal"].map({
+        "STRONG BUY": "🟢🟢 FORT ACHAT",
+        "BUY":        "🟢 ACHAT",
+        "WATCH":      "🟡 SURVEILLER",
+        "WEAK":       "🟠 FAIBLE",
+        "SKIP":       "⚫ IGNORER",
+    }).fillna(sig_df["signal"])
+    sig_df["amount_mid"] = ((sig_df["amount_low"].fillna(0) + sig_df["amount_high"].fillna(0)) / 2).astype(int)
+    sig_df["montant"] = sig_df["amount_mid"].apply(lambda x: f"${x:,}" if x > 0 else "N/A")
+    sig_df["breakdown"] = sig_df["score_breakdown"].apply(
+        lambda b: f"pol:{b.get('politician_reliability',0):.0f} "
+                  f"inv:{b.get('super_investor_alignment',0):.0f} "
+                  f"news:{b.get('news_sentiment',0):.0f} "
+                  f"size:{b.get('trade_size',0):.0f} "
+                  f"speed:{b.get('disclosure_speed',0):.0f}"
+    )
+
+    # Score bar chart
+    fig_score = px.bar(
+        sig_df.head(15), x="score", y="politician",
+        orientation="h", color="score",
+        color_continuous_scale=["#e74c3c", "#f39c12", "#2ecc71"],
+        color_continuous_midpoint=60,
+        text="ticker",
+        labels={"score": "Score (0-100)", "politician": "Élu"},
+        title="Signaux par élu (60 derniers jours)",
+    )
+    fig_score.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+    fig_score.update_traces(textposition="inside")
+    st.plotly_chart(fig_score, use_container_width=True)
+
+    st.dataframe(
+        sig_df[["score", "signal_icon", "politician", "ticker", "trade_type",
+                "trade_date", "montant", "breakdown"]].head(20),
+        use_container_width=True, hide_index=True,
+        column_config={
+            "score": st.column_config.NumberColumn("Score", format="%.1f"),
+            "signal_icon": "Signal",
+            "politician": "Élu",
+            "ticker": "Ticker",
+            "trade_type": "Type",
+            "trade_date": "Date trade",
+            "montant": "Montant",
+            "breakdown": "Détail score",
+        }
+    )
+else:
+    st.info("Aucun signal calculé — les trades récents apparaîtront ici.")
+
+st.divider()
+
+# ── IBKR connexion live ──
+st.subheader("📡 Connexion IBKR TWS (Paper)")
+
+if _IBKR_AVAILABLE:
+    col_ibkr1, col_ibkr2 = st.columns([1, 3])
+    with col_ibkr1:
+        if st.button("🔌 Connecter TWS", key="ibkr_connect"):
+            with st.spinner("Connexion à TWS port 7497..."):
+                ok = ibkr_connect()
+            if ok:
+                st.success("Connecté !")
+            else:
+                st.error("Échec — TWS ouvert et API activée ?")
+
+    connected = is_connected()
+    st.caption(f"État : {'🟢 Connecté' if connected else '🔴 Déconnecté (lancez TWS + cliquez Connecter)'}")
+
+    if connected:
+        # Account summary
+        summary = account_summary()
+        if summary:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Liquidation nette", f"${summary.get('NetLiquidation', 0):,.0f}")
+            c2.metric("Cash disponible", f"${summary.get('TotalCashValue', 0):,.0f}")
+            c3.metric("Fonds disponibles", f"${summary.get('AvailableFunds', 0):,.0f}")
+            pnl = summary.get('UnrealizedPnL', 0)
+            c4.metric("P&L non réalisé", f"${pnl:,.0f}", delta=f"{pnl:+,.0f}")
+
+        # Open positions
+        positions = get_positions()
+        if positions:
+            st.write("**Positions ouvertes (paper)**")
+            pos_df = pd.DataFrame(positions)
+            st.dataframe(pos_df, use_container_width=True, hide_index=True,
+                        column_config={
+                            "symbol": "Ticker",
+                            "qty": st.column_config.NumberColumn("Quantité", format="%d"),
+                            "avg_cost": st.column_config.NumberColumn("Coût moy.", format="$%.2f"),
+                            "market_value": st.column_config.NumberColumn("Valeur marché", format="$%.2f"),
+                        })
+
+        # Manual signal execution
+        st.write("**Exécuter un signal manuellement**")
+        if signals:
+            top_sig = signals[0]
+            col_ex1, col_ex2, col_ex3 = st.columns(3)
+            with col_ex1:
+                exec_ticker = st.selectbox("Ticker", [s["ticker"] for s in signals[:10]], key="exec_ticker")
+            with col_ex2:
+                exec_action = st.selectbox("Action", ["BUY", "SELL"], key="exec_action")
+            with col_ex3:
+                exec_budget = st.number_input("Budget ($)", value=1000, min_value=100, max_value=10000, step=100, key="exec_budget")
+
+            sel_sig = next((s for s in signals if s["ticker"] == exec_ticker), signals[0])
+            st.caption(f"Signal sélectionné : score {sel_sig['score']:.1f} — {sel_sig['signal']} — {sel_sig['politician']}")
+
+            if st.button(f"📤 Passer ordre PAPER {exec_action} {exec_ticker}", key="place_order"):
+                with st.spinner("Passage de l'ordre..."):
+                    result = place_order(
+                        exec_ticker, exec_action,
+                        score=sel_sig["score"],
+                        politician=sel_sig["politician"],
+                        trade_ref=sel_sig["id"],
+                        budget_usd=exec_budget,
+                    )
+                if result.get("status") in ("Filled", "Submitted", "PreSubmitted"):
+                    st.success(f"Ordre {exec_action} {result.get('qty')} {exec_ticker} @ ${result.get('fill_price')} — Total: ${result.get('total_usd'):,.0f}")
+                else:
+                    st.error(f"Erreur: {result.get('reason', result.get('status'))}")
+
+# ── Historique des ordres paper ──
+st.write("**Historique ordres paper**")
+try:
+    orders = get_paper_orders(30)
+    if orders:
+        ord_df = pd.DataFrame(orders)
+        ord_df["pnl_fmt"] = ord_df["pnl"].apply(lambda x: f"${x:+,.0f}" if x else "—")
+        st.dataframe(
+            ord_df[["placed_at", "ticker", "action", "qty", "fill_price",
+                    "status", "signal_score", "politician", "pnl_fmt"]],
+            use_container_width=True, hide_index=True,
+            column_config={
+                "placed_at": "Date",
+                "ticker": "Ticker",
+                "action": "Action",
+                "qty": st.column_config.NumberColumn("Qté", format="%d"),
+                "fill_price": st.column_config.NumberColumn("Prix exec.", format="$%.2f"),
+                "status": "Statut",
+                "signal_score": st.column_config.NumberColumn("Score", format="%.1f"),
+                "politician": "Élu suivi",
+                "pnl_fmt": "P&L",
+            }
+        )
+    else:
+        st.info("Aucun ordre passé encore — utilisez le formulaire ci-dessus.")
+except Exception:
+    st.info("Aucun ordre passé encore.")
 
 # --- Logs ---
 with st.expander("🔧 Logs de synchronisation"):
