@@ -43,6 +43,29 @@ def init_db():
             count       INTEGER,
             status      TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS news (
+            id           TEXT PRIMARY KEY,
+            ticker       TEXT,
+            headline     TEXT,
+            summary      TEXT,
+            url          TEXT,
+            source       TEXT,
+            published_at TEXT,
+            sentiment    REAL,
+            sentiment_label TEXT,
+            fetched_at   TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_news_ticker ON news(ticker);
+        CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at);
+
+        CREATE TABLE IF NOT EXISTS news_trades (
+            news_id      TEXT,
+            trade_id     TEXT,
+            lead_days    REAL,
+            PRIMARY KEY (news_id, trade_id)
+        );
     """)
     conn.commit()
     conn.close()
@@ -94,6 +117,38 @@ def upsert_price(ticker: str, price: float, change_pct: float, volume: int = 0, 
     conn.execute(
         "INSERT OR REPLACE INTO prices (ticker, fetched_at, price, change_pct, volume, avg_volume) VALUES (?, ?, ?, ?, ?, ?)",
         (ticker, datetime.utcnow().strftime("%Y-%m-%d %H:%M"), price, change_pct, volume, avg_volume),
+    )
+    conn.commit()
+    conn.close()
+
+
+def upsert_news(article: dict) -> bool:
+    """Insert news article; returns True if new."""
+    conn = get_conn()
+    existing = conn.execute("SELECT 1 FROM news WHERE id = ?", (article["id"],)).fetchone()
+    if not existing:
+        conn.execute(
+            """INSERT INTO news (id, ticker, headline, summary, url, source, published_at, sentiment, sentiment_label)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                article["id"], article.get("ticker", ""), article.get("headline", ""),
+                article.get("summary", ""), article.get("url", ""), article.get("source", ""),
+                article.get("published_at", ""), article.get("sentiment", 0.0),
+                article.get("sentiment_label", "neutral"),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
+
+def link_news_to_trades(news_id: str, trade_id: str, lead_days: float):
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO news_trades (news_id, trade_id, lead_days) VALUES (?, ?, ?)",
+        (news_id, trade_id, lead_days),
     )
     conn.commit()
     conn.close()

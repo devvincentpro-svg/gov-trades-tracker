@@ -2,6 +2,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from ingestion import house_watcher, senate_watcher, finnhub_client
 from ingestion import capitol_trades_scraper, congress_api_client, dataroma_scraper, sec_edgar_13f
 from ingestion.capitol_trades_by_politician import fetch_watchlist
+from ingestion.news_fetcher import fetch_all_active_tickers
+from analysis.news_correlation import compute_lead_times
 
 WATCHLIST = [
     # Original watchlist
@@ -70,6 +72,12 @@ def run_all():
     log.info("── Prix Yahoo Finance ──")
     fetch_prices()
     log.info("  Prices updated")
+
+    log.info("── News multi-sources (Finnhub/Yahoo/GoogleRSS/GDELT/Reddit) ──")
+    log.info(f"  {fetch_all_active_tickers(days_back=7)} nouveaux articles")
+
+    log.info("── Corrélation news/trades (lead time) ──")
+    log.info(f"  {compute_lead_times()} liens news-trades calculés")
 
 
 def run_pfd_once():

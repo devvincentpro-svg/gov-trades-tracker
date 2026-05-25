@@ -5,6 +5,10 @@ import plotly.graph_objects as go
 from database import get_conn, init_db
 from scheduler import start, run_all
 from analysis.cross_reference import get_shared_tickers, get_top_aligned_trades, get_alignment
+from analysis.news_correlation import (
+    get_advance_trades, get_politician_timing_stats,
+    get_ticker_sentiment_timeline, get_news_for_ticker, get_sentiment_vs_trades
+)
 import threading
 
 st.set_page_config(
@@ -511,6 +515,207 @@ try:
     pass
 except Exception:
     pass
+
+# ═══════════════════════════════════════════════════════════
+# NEWS & RÉSEAUX SOCIAUX — ANALYSE DE TIMING
+# ═══════════════════════════════════════════════════════════
+st.divider()
+st.header("📰 News, Réseaux Sociaux & Timing des trades")
+st.caption("Sources : Finnhub · Yahoo Finance · Google News · GDELT · Reddit  |  Sentiment : VADER  |  Twitter : configuration requise")
+
+@st.cache_data(ttl=120)
+def load_timing_stats():
+    return get_politician_timing_stats()
+
+@st.cache_data(ttl=120)
+def load_advance_trades(min_lead):
+    return get_advance_trades(min_lead_days=min_lead, limit=60)
+
+timing_stats = load_timing_stats()
+
+if timing_stats:
+    st.subheader("⏱ Élus en avance sur le cycle des nouvelles")
+    st.caption("avg_lead_days > 0 : l'élu a tradé en moyenne X jours **avant** que la presse en parle")
+
+    ts_df = pd.DataFrame(timing_stats)
+    ts_df["pct_ahead"] = (ts_df["trades_ahead"] / ts_df["trades_with_news"].replace(0, 1) * 100).round(1)
+    ts_df["avg_lead_days"] = ts_df["avg_lead_days"].round(1)
+    ts_df["avg_news_sentiment"] = ts_df["avg_news_sentiment"].round(3)
+    ts_df["sentiment_icon"] = ts_df["avg_news_sentiment"].apply(
+        lambda x: "📈" if x > 0.05 else ("📉" if x < -0.05 else "—")
+    )
+    ts_df["party_label"] = ts_df["party"].map(
+        {"D": "Dem.", "Democrat": "Dem.", "R": "Rép.", "Republican": "Rép."}
+    ).fillna(ts_df["party"])
+
+    col_t1, col_t2 = st.columns([3, 2])
+    with col_t1:
+        fig_timing = px.bar(
+            ts_df.head(20), x="avg_lead_days", y="politician",
+            orientation="h", color="avg_lead_days",
+            color_continuous_scale="RdYlGn",
+            labels={"avg_lead_days": "Jours d'avance moy.", "politician": "Élu"},
+            title="Avance moyenne sur les nouvelles (jours)",
+        )
+        fig_timing.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+        st.plotly_chart(fig_timing, use_container_width=True)
+
+    with col_t2:
+        st.dataframe(
+            ts_df[["politician", "party_label", "avg_lead_days", "pct_ahead",
+                   "trades_ahead", "trades_with_news", "sentiment_icon"]].head(20),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "politician": "Élu",
+                "party_label": "Parti",
+                "avg_lead_days": st.column_config.NumberColumn("Avance moy. (j)", format="%.1f"),
+                "pct_ahead": st.column_config.NumberColumn("% trades en avance", format="%.1f%%"),
+                "trades_ahead": st.column_config.NumberColumn("Trades en avance", format="%d"),
+                "trades_with_news": st.column_config.NumberColumn("Trades liés à news", format="%d"),
+                "sentiment_icon": "Sentiment news",
+            },
+        )
+else:
+    st.info("Données de corrélation news en cours de collecte... La première exécution peut prendre quelques minutes.")
+
+st.divider()
+
+# ── Trades anticipatoires ──
+st.subheader("🚨 Trades passés AVANT une news significative")
+min_lead = st.slider("Délai minimum (jours avant la news)", 1, 30, 5, key="lead_slider")
+advance = load_advance_trades(min_lead)
+
+if advance:
+    adv_df = pd.DataFrame(advance)
+    adv_df["trade_type"] = adv_df["trade_type"].map({"buy": "🟢 Achat", "sell": "🔴 Vente"}).fillna(adv_df["trade_type"])
+    adv_df["sentiment_icon"] = adv_df["sentiment"].apply(
+        lambda x: f"📈 +{x:.2f}" if x > 0.05 else (f"📉 {x:.2f}" if x < -0.05 else f"— {x:.2f}")
+    )
+    adv_df["amount_fmt"] = adv_df["amount"].apply(lambda x: f"${x:,.0f}" if x > 0 else "N/A")
+
+    st.dataframe(
+        adv_df[["politician", "party", "ticker", "trade_type", "trade_date",
+                "lead_days", "amount_fmt", "headline", "published_at", "sentiment_icon", "source"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "politician": "Élu",
+            "party": "Parti",
+            "ticker": "Ticker",
+            "trade_type": "Type",
+            "trade_date": "Date trade",
+            "lead_days": st.column_config.NumberColumn("Jours avant news", format="%.1f"),
+            "amount_fmt": "Montant",
+            "headline": "Titre de la news",
+            "published_at": "Date news",
+            "sentiment_icon": "Sentiment",
+            "source": "Source",
+        },
+    )
+
+    # Scatter: lead_days vs sentiment, colored by politician
+    fig_lead = px.scatter(
+        adv_df, x="lead_days", y="sentiment", color="politician",
+        size="amount", hover_data=["ticker", "headline", "trade_type"],
+        labels={"lead_days": "Jours avant la news", "sentiment": "Sentiment de la news"},
+        title="Avance sur news vs sentiment : chaque point = 1 trade",
+    )
+    fig_lead.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig_lead.add_vline(x=0, line_dash="dash", line_color="gray")
+    fig_lead.update_layout(
+        annotations=[
+            dict(x=15, y=0.5, text="Achat avant bonne news", showarrow=False, font=dict(color="green")),
+            dict(x=15, y=-0.5, text="Vente avant mauvaise news", showarrow=False, font=dict(color="red")),
+        ]
+    )
+    st.plotly_chart(fig_lead, use_container_width=True)
+else:
+    st.info("Aucun trade anticipatoire trouvé pour ce seuil. Les données news se collectent en arrière-plan.")
+
+st.divider()
+
+# ── Sentiment & timeline par ticker ──
+st.subheader("📊 Sentiment & trades par ticker")
+ticker_list = sorted(df[df["ticker"] != ""]["ticker"].unique())
+sel_ticker = st.selectbox("Choisir un ticker", [""] + list(ticker_list), key="news_ticker")
+
+if sel_ticker:
+    col_n1, col_n2 = st.columns([2, 1])
+
+    with col_n1:
+        sentiment_df = get_ticker_sentiment_timeline(sel_ticker)
+        trades_ticker = df[(df["ticker"] == sel_ticker) & (df["trade_date"] != "")].copy()
+        trades_ticker["trade_date"] = pd.to_datetime(trades_ticker["trade_date"], errors="coerce")
+        trades_ticker = trades_ticker.dropna(subset=["trade_date"])
+
+        if not sentiment_df.empty or not trades_ticker.empty:
+            fig_tl = go.Figure()
+
+            if not sentiment_df.empty:
+                fig_tl.add_trace(go.Scatter(
+                    x=sentiment_df["published_at"], y=sentiment_df["sentiment"],
+                    mode="markers", name="Sentiment news",
+                    marker=dict(
+                        color=sentiment_df["sentiment"],
+                        colorscale="RdYlGn", size=8, cmin=-1, cmax=1,
+                        showscale=True, colorbar=dict(title="Sentiment"),
+                    ),
+                    hovertext=sentiment_df["headline"],
+                    hoverinfo="text+x+y",
+                ))
+
+            for _, trade in trades_ticker.iterrows():
+                color = "#2ecc71" if trade["trade_type"] == "buy" else "#e74c3c"
+                fig_tl.add_vline(
+                    x=trade["trade_date"].timestamp() * 1000,
+                    line_dash="dot", line_color=color, opacity=0.6,
+                    annotation_text=f"{trade['politician'][:10]} {trade['trade_type']}",
+                    annotation_font_size=9,
+                )
+
+            fig_tl.update_layout(
+                title=f"Timeline sentiment news + trades — {sel_ticker}",
+                xaxis_title="Date", yaxis_title="Score sentiment",
+                hovermode="closest",
+            )
+            st.plotly_chart(fig_tl, use_container_width=True)
+        else:
+            st.info(f"Pas encore de news pour {sel_ticker}. Lancez une synchronisation.")
+
+    with col_n2:
+        st.write(f"**Dernières news — {sel_ticker}**")
+        news_list = get_news_for_ticker(sel_ticker, 15)
+        if news_list:
+            for art in news_list:
+                icon = "📈" if art["sentiment_label"] == "positive" else ("📉" if art["sentiment_label"] == "negative" else "—")
+                src_short = art["source"].split(":")[0].replace("_", " ")
+                with st.container():
+                    if art["url"]:
+                        st.markdown(f"{icon} [{art['headline'][:80]}...]({art['url']})")
+                    else:
+                        st.write(f"{icon} {art['headline'][:80]}...")
+                    st.caption(f"{art['published_at'][:10]} · {src_short} · score: {art['sentiment']:.2f}")
+        else:
+            st.info("Aucune news en base pour ce ticker.")
+
+st.divider()
+
+# ── Note Twitter / Facebook ──
+with st.expander("📢 Configuration Twitter / Facebook"):
+    st.markdown("""
+**Twitter/X** (optionnel — données sociales les plus riches)
+1. Créer un compte développeur sur [developer.twitter.com](https://developer.twitter.com)
+2. Créer une app, récupérer le **Bearer Token** (accès gratuit : 500K tweets/mois)
+3. Ajouter dans `.env` :
+   ```
+   TWITTER_BEARER_TOKEN=votre_token_ici
+   ```
+4. Le module `ingestion/news_fetcher.py` utilisera automatiquement Twitter.
+
+**Facebook** — API Graph très restrictive (approbation requise, pages publiques seulement).
+En pratique, le signal Reddit + Google News couvre 95% du bruit social utile.
+    """)
 
 # --- Logs ---
 with st.expander("🔧 Logs de synchronisation"):
