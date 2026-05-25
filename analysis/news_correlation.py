@@ -19,8 +19,10 @@ def _parse_date(s: str) -> datetime | None:
 
 def compute_lead_times(window_days: int = 30) -> int:
     """
-    For each trade with a ticker, find news published in the next `window_days` days.
-    Store lead_days in news_trades table. Returns number of links created.
+    For each trade with a ticker, link it to nearby news:
+    - Positive lead_days: news came AFTER the trade (politician was ahead)
+    - Negative lead_days: news came BEFORE the trade (politician reacted)
+    Window spans [-window_days, +window_days] around the trade date.
     """
     conn = get_conn()
     trades = conn.execute(
@@ -33,7 +35,9 @@ def compute_lead_times(window_days: int = 30) -> int:
         if not trade_dt:
             continue
 
-        window_end = trade_dt + timedelta(days=window_days)
+        window_start = trade_dt - timedelta(days=7)   # 7 days before (reacting to news)
+        window_end = trade_dt + timedelta(days=window_days)   # window_days after
+
         news_rows = conn.execute(
             """SELECT id, published_at, sentiment FROM news
                WHERE ticker = ?
@@ -42,7 +46,7 @@ def compute_lead_times(window_days: int = 30) -> int:
                AND ABS(sentiment) >= 0.05""",
             (
                 ticker,
-                trade_dt.strftime("%Y-%m-%d"),
+                window_start.strftime("%Y-%m-%d"),
                 window_end.strftime("%Y-%m-%d"),
             ),
         ).fetchall()
@@ -62,22 +66,33 @@ def compute_lead_times(window_days: int = 30) -> int:
 def get_advance_trades(min_lead_days: float = 3.0, limit: int = 50) -> list[dict]:
     """
     Trades where politician acted at least `min_lead_days` before significant news.
-    Returns sorted by lead_days desc (most anticipatory first).
+    One row per trade (the most significant news after the trade).
+    Sorted by lead_days desc (most anticipatory first).
     """
     conn = get_conn()
     rows = conn.execute(
-        """SELECT
+        """WITH ranked_news AS (
+               -- For each trade, pick the FIRST significant news after it (min lead_days)
+               SELECT
+                   nt.trade_id,
+                   nt.lead_days,
+                   n.headline, n.source, n.published_at, n.sentiment, n.sentiment_label, n.url,
+                   ROW_NUMBER() OVER (PARTITION BY nt.trade_id ORDER BY nt.lead_days ASC) AS rn
+               FROM news_trades nt
+               JOIN news n ON n.id = nt.news_id
+               WHERE nt.lead_days >= ?
+                 AND ABS(n.sentiment) >= 0.1
+           )
+           SELECT
                t.politician, t.ticker, t.asset_name, t.trade_type, t.trade_date,
                t.party, t.chamber,
                (COALESCE(t.amount_low,0)+COALESCE(t.amount_high,0))/2 AS amount,
-               nt.lead_days,
-               n.headline, n.source, n.published_at, n.sentiment, n.sentiment_label, n.url
-           FROM news_trades nt
-           JOIN trades t ON t.id = nt.trade_id
-           JOIN news n   ON n.id = nt.news_id
-           WHERE nt.lead_days >= ?
-             AND ABS(n.sentiment) >= 0.1
-           ORDER BY nt.lead_days DESC
+               rn.lead_days,
+               rn.headline, rn.source, rn.published_at, rn.sentiment, rn.sentiment_label, rn.url
+           FROM ranked_news rn
+           JOIN trades t ON t.id = rn.trade_id
+           WHERE rn.rn = 1
+           ORDER BY rn.lead_days DESC
            LIMIT ?""",
         (min_lead_days, limit),
     ).fetchall()
@@ -92,20 +107,32 @@ def get_advance_trades(min_lead_days: float = 3.0, limit: int = 50) -> list[dict
 def get_politician_timing_stats() -> list[dict]:
     """
     Per-politician: avg lead days, % trades before significant news, count.
+    Aggregates per-trade first (min lead_days per trade) to avoid multi-article bias.
     Higher avg_lead_days = consistently ahead of news cycle.
     """
     conn = get_conn()
     rows = conn.execute(
-        """SELECT
+        """WITH trade_lead AS (
+               -- For each trade, take the MINIMUM lead time (= the first news that came out)
+               -- and the average sentiment of news following the trade
+               SELECT
+                   nt.trade_id,
+                   MIN(nt.lead_days)    AS first_news_lead,
+                   AVG(n.sentiment)     AS trade_sentiment
+               FROM news_trades nt
+               JOIN news n ON n.id = nt.news_id AND ABS(n.sentiment) >= 0.05
+               WHERE nt.lead_days >= 0
+               GROUP BY nt.trade_id
+           )
+           SELECT
                t.politician, t.party, t.chamber,
-               COUNT(DISTINCT t.id)             AS total_trades,
-               COUNT(DISTINCT nt.trade_id)      AS trades_with_news,
-               AVG(nt.lead_days)                AS avg_lead_days,
-               SUM(CASE WHEN nt.lead_days > 3 THEN 1 ELSE 0 END) AS trades_ahead,
-               AVG(n.sentiment)                 AS avg_news_sentiment
+               COUNT(DISTINCT t.id)                                     AS total_trades,
+               COUNT(tl.trade_id)                                       AS trades_with_news,
+               AVG(tl.first_news_lead)                                  AS avg_lead_days,
+               COUNT(CASE WHEN tl.first_news_lead > 3 THEN 1 END)      AS trades_ahead,
+               AVG(tl.trade_sentiment)                                  AS avg_news_sentiment
            FROM trades t
-           LEFT JOIN news_trades nt ON nt.trade_id = t.id
-           LEFT JOIN news n         ON n.id = nt.news_id AND ABS(n.sentiment) >= 0.1
+           LEFT JOIN trade_lead tl ON tl.trade_id = t.id
            WHERE t.ticker != ''
            GROUP BY t.politician
            HAVING trades_with_news > 0
