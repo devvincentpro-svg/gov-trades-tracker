@@ -1,6 +1,17 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from ingestion import house_watcher, senate_watcher, finnhub_client
 from ingestion import capitol_trades_scraper, congress_api_client, dataroma_scraper, sec_edgar_13f
+from ingestion.capitol_trades_by_politician import fetch_watchlist
+
+WATCHLIST = [
+    {"bioguide": "P000197", "name": "Nancy Pelosi",    "party": "D", "state": "California",   "chamber": "house"},
+    {"bioguide": "M001157", "name": "Michael McCaul",  "party": "R", "state": "Texas",         "chamber": "house"},
+    {"bioguide": "K000389", "name": "Ro Khanna",       "party": "D", "state": "California",   "chamber": "house"},
+    {"bioguide": "G000590", "name": "Mark Green",      "party": "R", "state": "Tennessee",    "chamber": "house"},
+    {"bioguide": "F000479", "name": "John Fetterman",  "party": "D", "state": "Pennsylvania", "chamber": "senate"},
+    {"bioguide": "S001189", "name": "Austin Scott",    "party": "R", "state": "Georgia",      "chamber": "house"},
+    {"bioguide": "S001150", "name": "Adam Schiff",     "party": "D", "state": "California",   "chamber": "senate"},
+]
 from market.prices import fetch_prices
 from config import POLL_INTERVAL
 import logging
@@ -16,8 +27,11 @@ def run_all():
     log.info("── Senate Stock Watcher ──")
     log.info(f"  {senate_watcher.fetch()} trades")
 
-    log.info("── Capitol Trades (scraper) ──")
+    log.info("── Capitol Trades (scraper général) ──")
     log.info(f"  {capitol_trades_scraper.fetch(pages=3)} trades")
+
+    log.info("── Capitol Trades (watchlist par politicien) ──")
+    log.info(f"  {fetch_watchlist(WATCHLIST, max_pages=5)} trades")
 
     log.info("── Finnhub ──")
     log.info(f"  {finnhub_client.fetch()} trades")
