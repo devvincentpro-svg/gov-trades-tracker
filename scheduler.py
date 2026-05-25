@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from ingestion import house_watcher, senate_watcher, finnhub_client
-from ingestion import capitol_trades_scraper, congress_api_client
+from ingestion import capitol_trades_scraper, congress_api_client, dataroma_scraper, sec_edgar_13f
 from market.prices import fetch_prices
 from config import POLL_INTERVAL
 import logging
@@ -31,10 +31,16 @@ def run_all():
 
 
 def run_pfd_once():
-    """Rebuild Congress member index once a day."""
+    """Heavy jobs: rebuild Congress index + refresh super investor holdings."""
     log.info("── Congress.gov — rebuild member index ──")
     congress_api_client._MEMBER_INDEX = congress_api_client.build_member_index()
     log.info(f"  {len(congress_api_client._MEMBER_INDEX)} members indexed")
+
+    log.info("── SEC EDGAR — 13F super investor holdings ──")
+    log.info(f"  {sec_edgar_13f.fetch()} holdings")
+
+    log.info("── Dataroma — super investor holdings ──")
+    log.info(f"  {dataroma_scraper.fetch(max_managers=30)} holdings")
 
 
 def start() -> BackgroundScheduler:

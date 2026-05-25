@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from database import get_conn, init_db
 from scheduler import start, run_all
+from analysis.cross_reference import get_shared_tickers, get_top_aligned_trades, get_alignment
 import threading
 
 st.set_page_config(
@@ -76,7 +77,7 @@ def load_log() -> pd.DataFrame:
 
 # --- Layout ---
 st.title("📊 Gov Trades Tracker")
-st.caption("Sources : Capitol Trades · Congress.gov API · Finnhub (secteurs) · Yahoo Finance (prix)")
+st.caption("Sources : Capitol Trades · Congress.gov API · Finnhub · Yahoo Finance · SEC EDGAR 13F · Dataroma (super investisseurs)")
 
 df = load_trades()
 prices = load_prices()
@@ -258,6 +259,81 @@ if "trade_date" in filtered.columns:
                    color_discrete_map={"buy": "#2ecc71", "sell": "#e74c3c"},
                    labels={"trade_date": "Mois", "count": "Nombre de trades", "trade_type": "Type"})
     st.plotly_chart(fig4, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════
+# SUPER INVESTISSEURS — CROISEMENT
+# ═══════════════════════════════════════════════════════════
+st.divider()
+st.header("🐋 Croisement Super Investisseurs")
+
+@st.cache_data(ttl=300)
+def load_shared():
+    return get_shared_tickers()
+
+@st.cache_data(ttl=300)
+def load_top_aligned():
+    return get_top_aligned_trades(20)
+
+shared = load_shared()
+top_aligned = load_top_aligned()
+
+if shared:
+    col_s1, col_s2 = st.columns(2)
+
+    with col_s1:
+        st.subheader("🔗 Tickers tradés par élus ET détenus par super investisseurs")
+        sh_df = pd.DataFrame(shared)
+        sh_df.columns = ["Ticker", "Élus", "Super Investisseurs", "Volume politique ($)"]
+        fig_sh = px.scatter(
+            sh_df, x="Super Investisseurs", y="Élus",
+            size="Volume politique ($)", text="Ticker",
+            color="Super Investisseurs", color_continuous_scale="Blues",
+            labels={"Super Investisseurs": "Nb super investisseurs", "Élus": "Nb élus"},
+            title="Convergence smart money / élus"
+        )
+        fig_sh.update_traces(textposition="top center")
+        st.plotly_chart(fig_sh, use_container_width=True)
+
+    with col_s2:
+        st.subheader("📊 Top tickers convergents")
+        st.dataframe(
+            sh_df.head(20),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Volume politique ($)": st.column_config.NumberColumn(format="$%d"),
+            }
+        )
+
+if top_aligned:
+    st.subheader("⭐ Trades politiques les plus alignés avec le smart money")
+    al_df = pd.DataFrame(top_aligned)
+    al_df["trade_type"] = al_df["trade_type"].map({"buy": "🟢 Achat", "sell": "🔴 Vente"}).fillna(al_df["trade_type"])
+    al_df["alignment_score"] = al_df["alignment_score"].apply(lambda x: f"{x:.1f}%")
+    st.dataframe(
+        al_df[["ticker", "politician", "trade_type", "trade_date", "super_investors_count", "alignment_score", "top_investor"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "ticker": "Ticker",
+            "politician": "Élu",
+            "trade_type": "Type",
+            "trade_date": "Date",
+            "super_investors_count": "# Super Inv.",
+            "alignment_score": "Score alignement",
+            "top_investor": "Principal super investisseur",
+        }
+    )
+
+    # Detail: click on ticker → show who holds it
+    selected = st.selectbox("Détail super investisseurs pour :", [""] + [t["ticker"] for t in top_aligned])
+    if selected:
+        investors = get_alignment(selected)
+        if investors:
+            inv_df = pd.DataFrame(investors)
+            inv_df["value_usd"] = inv_df["value_usd"].apply(lambda x: f"${x:,.0f}")
+            inv_df["shares"] = inv_df["shares"].apply(lambda x: f"{x:,}")
+            st.dataframe(inv_df, use_container_width=True, hide_index=True)
 
 # --- Sources breakdown ---
 st.subheader("🗂 Couverture par source")
