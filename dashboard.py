@@ -76,7 +76,7 @@ def load_log() -> pd.DataFrame:
 
 # --- Layout ---
 st.title("📊 Gov Trades Tracker")
-st.caption("Données croisées : House Stock Watcher · Senate Stock Watcher · Capitol Trades · Finnhub · OpenSecrets · Prix Yahoo Finance")
+st.caption("Sources : Capitol Trades · Congress.gov API · Finnhub (secteurs) · Yahoo Finance (prix)")
 
 df = load_trades()
 prices = load_prices()
@@ -163,6 +163,28 @@ with col_right:
                   color="Type", color_discrete_map={"Achat": "#2ecc71", "Vente": "#e74c3c", "Échange": "#3498db"})
     st.plotly_chart(fig2, use_container_width=True)
 
+# --- Parti républicain vs démocrate ---
+if "party" in filtered.columns:
+    party_data = filtered[filtered["party"].isin(["Republican", "Democrat", "R", "D"])]
+    if not party_data.empty:
+        st.subheader("🔴🔵 Trades par parti politique")
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            party_type = party_data.groupby(["party", "trade_type"]).size().reset_index(name="count")
+            fig_party = px.bar(party_type, x="party", y="count", color="trade_type",
+                               color_discrete_map={"buy": "#2ecc71", "sell": "#e74c3c"},
+                               barmode="group",
+                               labels={"party": "Parti", "count": "Trades", "trade_type": "Type"})
+            st.plotly_chart(fig_party, use_container_width=True)
+        with col_p2:
+            party_vol = party_data.groupby("party")["amount_mid"].sum().reset_index()
+            party_vol.columns = ["Parti", "Volume estimé ($)"]
+            fig_pvol = px.bar(party_vol, x="Parti", y="Volume estimé ($)",
+                              color="Parti",
+                              color_discrete_map={"Republican": "#e74c3c", "Democrat": "#3498db",
+                                                  "R": "#e74c3c", "D": "#3498db"})
+            st.plotly_chart(fig_pvol, use_container_width=True)
+
 # --- Secteurs les plus tradés (via Finnhub) ---
 ticker_info = load_ticker_info()
 if not ticker_info.empty:
@@ -247,6 +269,12 @@ for src in ["house_watcher", "senate_watcher", "capitol_trades", "finnhub", "ope
         "Trades couverts": mask.sum(),
         "Élus uniques": df[mask]["politician"].nunique(),
     })
+for src in ["congress_api", "finnhub_enrich"]:
+    source_stats.append({
+        "Source": src.replace("_", " ").title() + " (enrichissement)",
+        "Trades couverts": "—",
+        "Élus uniques": "—",
+    })
 src_df = pd.DataFrame(source_stats)
 st.dataframe(src_df, use_container_width=True, hide_index=True)
 
@@ -258,11 +286,7 @@ try:
         conn,
     )
     conn.close()
-    if not pfd.empty:
-        st.subheader("💼 Holdings déclarés (OpenSecrets PFD)")
-        pfd["Valeur estimée"] = ((pfd["value_low"] + pfd["value_high"]) / 2).apply(lambda x: f"${x:,.0f}")
-        st.dataframe(pfd[["politician", "asset_name", "asset_type", "Valeur estimée"]],
-                     use_container_width=True, hide_index=True)
+    pass
 except Exception:
     pass
 

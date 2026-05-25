@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 FINNHUB_API_KEY    = os.getenv("FINNHUB_API_KEY", "")
-OPENSECRETS_KEY    = os.getenv("OPENSECRETS_KEY", "")
+CONGRESS_API_KEY   = os.getenv("CONGRESS_API_KEY", "DEMO_KEY")  # free at api.data.gov
 POLL_INTERVAL      = int(os.getenv("POLL_INTERVAL", 900))
 DB_PATH            = "trades.db"
 

@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from ingestion import house_watcher, senate_watcher, finnhub_client
-from ingestion import capitol_trades_scraper, opensecrets_client
+from ingestion import capitol_trades_scraper, congress_api_client
 from market.prices import fetch_prices
 from config import POLL_INTERVAL
 import logging
@@ -22,8 +22,8 @@ def run_all():
     log.info("── Finnhub ──")
     log.info(f"  {finnhub_client.fetch()} trades")
 
-    log.info("── OpenSecrets — enrichissement parti/état ──")
-    log.info(f"  {opensecrets_client.enrich_with_pfd()} enrichis")
+    log.info("── Congress.gov — enrichissement parti/état ──")
+    log.info(f"  {congress_api_client.enrich_trades()} enrichis")
 
     log.info("── Prix Yahoo Finance ──")
     fetch_prices()
@@ -31,9 +31,10 @@ def run_all():
 
 
 def run_pfd_once():
-    """Heavy job: fetch PFD asset holdings — run once per day."""
-    log.info("── OpenSecrets — PFD assets ──")
-    log.info(f"  {opensecrets_client.fetch_legislator_assets()} assets")
+    """Rebuild Congress member index once a day."""
+    log.info("── Congress.gov — rebuild member index ──")
+    congress_api_client._MEMBER_INDEX = congress_api_client.build_member_index()
+    log.info(f"  {len(congress_api_client._MEMBER_INDEX)} members indexed")
 
 
 def start() -> BackgroundScheduler:
