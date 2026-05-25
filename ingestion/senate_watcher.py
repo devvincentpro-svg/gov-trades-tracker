@@ -3,20 +3,23 @@ from ingestion.normalizer import parse_amount, normalize_type, make_id, clean_ti
 from database import upsert_trade, log_fetch
 from config import SENATE_API_URL
 
+# senatestockwatcher.com is offline as of 2026.
+# This module logs the failure gracefully; Capitol Trades covers Senate trades.
 
-def fetch():
+
+def fetch() -> int:
     try:
-        resp = requests.get(SENATE_API_URL, timeout=30)
+        resp = requests.get(SENATE_API_URL, timeout=15)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        log_fetch("senate_watcher", 0, f"error: {e}")
+        log_fetch("senate_watcher", 0, f"unavailable: {e}")
         return 0
 
     count = 0
     for filing in data:
         senator = f"{filing.get('first_name', '')} {filing.get('last_name', '')}".strip()
-        disclosed = filing.get("date_recieved", "")  # API typo intentional
+        disclosed = filing.get("date_recieved", "")
 
         for tx in filing.get("transactions", []):
             ticker = clean_ticker(tx.get("ticker", ""))
