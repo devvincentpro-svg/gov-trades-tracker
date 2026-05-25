@@ -65,7 +65,7 @@ def load_log() -> pd.DataFrame:
 
 # --- Layout ---
 st.title("📊 Gov Trades Tracker")
-st.caption("Données croisées : House Stock Watcher · Senate Stock Watcher · Finnhub · Prix Yahoo Finance")
+st.caption("Données croisées : House Stock Watcher · Senate Stock Watcher · Capitol Trades · Finnhub · OpenSecrets · Prix Yahoo Finance")
 
 df = load_trades()
 prices = load_prices()
@@ -204,6 +204,35 @@ if "trade_date" in filtered.columns:
                    color_discrete_map={"buy": "#2ecc71", "sell": "#e74c3c"},
                    labels={"trade_date": "Mois", "count": "Nombre de trades", "trade_type": "Type"})
     st.plotly_chart(fig4, use_container_width=True)
+
+# --- Sources breakdown ---
+st.subheader("🗂 Couverture par source")
+source_stats = []
+for src in ["house_watcher", "senate_watcher", "capitol_trades", "finnhub", "opensecrets"]:
+    mask = df["sources"].str.contains(src, na=False)
+    source_stats.append({
+        "Source": src.replace("_", " ").title(),
+        "Trades couverts": mask.sum(),
+        "Élus uniques": df[mask]["politician"].nunique(),
+    })
+src_df = pd.DataFrame(source_stats)
+st.dataframe(src_df, use_container_width=True, hide_index=True)
+
+# --- PFD Assets (OpenSecrets) ---
+try:
+    conn = get_conn()
+    pfd = pd.read_sql_query(
+        "SELECT politician, asset_name, asset_type, value_low, value_high FROM pfd_assets ORDER BY value_high DESC LIMIT 100",
+        conn,
+    )
+    conn.close()
+    if not pfd.empty:
+        st.subheader("💼 Holdings déclarés (OpenSecrets PFD)")
+        pfd["Valeur estimée"] = ((pfd["value_low"] + pfd["value_high"]) / 2).apply(lambda x: f"${x:,.0f}")
+        st.dataframe(pfd[["politician", "asset_name", "asset_type", "Valeur estimée"]],
+                     use_container_width=True, hide_index=True)
+except Exception:
+    pass
 
 # --- Logs ---
 with st.expander("🔧 Logs de synchronisation"):

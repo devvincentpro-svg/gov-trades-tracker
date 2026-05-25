@@ -7,3 +7,5 @@ apscheduler==3.10.4
 python-dotenv==1.0.1
 SQLAlchemy==2.0.30
 finnhub-python==2.4.20
+beautifulsoup4==4.12.3
+lxml==5.2.2
