@@ -78,9 +78,48 @@ def place_order(
         mkt_data = ib.reqMktData(contract, "", True, False)
         ib.sleep(1.5)
         ib.cancelMktData(contract)
-        price = mkt_data.last or mkt_data.close or 0
+        import math
+        raw_price = mkt_data.last or mkt_data.close or 0
+        price = raw_price if (raw_price and not math.isnan(raw_price)) else 0
+
+        # Fallback 1: our own prices DB (most recent close)
         if price <= 0:
-            return {"status": "error", "reason": f"no price for {ticker}"}
+            try:
+                conn_p = get_conn()
+                row = conn_p.execute(
+                    "SELECT price FROM prices WHERE ticker=? ORDER BY fetched_at DESC LIMIT 1",
+                    (ticker,)
+                ).fetchone()
+                conn_p.close()
+                if row and row[0]:
+                    price = float(row[0])
+            except Exception:
+                pass
+
+        # Fallback 2: Finnhub quote
+        if price <= 0:
+            try:
+                import requests as req
+                from config import FINNHUB_API_KEY
+                r = req.get("https://finnhub.io/api/v1/quote",
+                            params={"symbol": ticker, "token": FINNHUB_API_KEY}, timeout=5)
+                if r.status_code == 200:
+                    price = float(r.json().get("c") or 0)
+            except Exception:
+                pass
+
+        # Fallback 3: yfinance (works on weekdays)
+        if price <= 0:
+            import yfinance as yf
+            try:
+                hist = yf.Ticker(ticker).history(period="5d")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+            except Exception:
+                pass
+
+        if price <= 0:
+            return {"status": "error", "reason": f"no price available for {ticker} (market closed?)"}
 
         qty = max(1, int(budget / price))
 
