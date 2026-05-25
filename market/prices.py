@@ -35,6 +35,14 @@ def fetch_prices(tickers: list[str] | None = None):
             first = df.iloc[0]
             price = float(last["Close"])
             change_pct = ((price - float(first["Open"])) / float(first["Open"])) * 100
-            upsert_price(ticker, round(price, 2), round(change_pct, 2))
+            day_volume = int(df["Volume"].sum()) if "Volume" in df.columns else 0
+            # Fetch avg volume via fast_info (non-blocking)
+            avg_vol = 0
+            try:
+                t = yf.Ticker(ticker)
+                avg_vol = int(t.fast_info.get("three_month_average_volume", 0) or 0)
+            except Exception:
+                pass
+            upsert_price(ticker, round(price, 2), round(change_pct, 2), day_volume, avg_vol)
         except Exception:
             continue

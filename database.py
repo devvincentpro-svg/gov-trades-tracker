@@ -32,6 +32,8 @@ def init_db():
             fetched_at  TEXT NOT NULL,
             price       REAL,
             change_pct  REAL,
+            volume      INTEGER,
+            avg_volume  INTEGER,
             PRIMARY KEY (ticker, fetched_at)
         );
 
@@ -79,12 +81,19 @@ def upsert_trade(trade: dict):
     conn.close()
 
 
-def upsert_price(ticker: str, price: float, change_pct: float):
+def upsert_price(ticker: str, price: float, change_pct: float, volume: int = 0, avg_volume: int = 0):
     from datetime import datetime
     conn = get_conn()
+    # Migrate: add columns if they don't exist (safe no-op if already there)
+    try:
+        conn.execute("ALTER TABLE prices ADD COLUMN volume INTEGER")
+        conn.execute("ALTER TABLE prices ADD COLUMN avg_volume INTEGER")
+        conn.commit()
+    except Exception:
+        pass
     conn.execute(
-        "INSERT OR REPLACE INTO prices (ticker, fetched_at, price, change_pct) VALUES (?, ?, ?, ?)",
-        (ticker, datetime.utcnow().strftime("%Y-%m-%d %H:%M"), price, change_pct),
+        "INSERT OR REPLACE INTO prices (ticker, fetched_at, price, change_pct, volume, avg_volume) VALUES (?, ?, ?, ?, ?, ?)",
+        (ticker, datetime.utcnow().strftime("%Y-%m-%d %H:%M"), price, change_pct, volume, avg_volume),
     )
     conn.commit()
     conn.close()

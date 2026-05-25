@@ -42,8 +42,19 @@ def load_trades() -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def load_prices() -> pd.DataFrame:
     conn = get_conn()
+    # Migrate columns if they don't exist
+    try:
+        conn.execute("ALTER TABLE prices ADD COLUMN volume INTEGER")
+        conn.execute("ALTER TABLE prices ADD COLUMN avg_volume INTEGER")
+        conn.commit()
+    except Exception:
+        pass
     df = pd.read_sql_query(
-        """SELECT p.* FROM prices p
+        """SELECT p.ticker, p.price, p.change_pct,
+                  COALESCE(p.volume, 0) as volume,
+                  COALESCE(p.avg_volume, 0) as avg_volume,
+                  p.fetched_at
+           FROM prices p
            INNER JOIN (
                SELECT ticker, MAX(fetched_at) as latest FROM prices GROUP BY ticker
            ) l ON p.ticker = l.ticker AND p.fetched_at = l.latest""",
@@ -93,6 +104,41 @@ col2.metric("Élus uniques", df["politician"].nunique())
 col3.metric("Tickers uniques", df["ticker"].replace("", pd.NA).dropna().nunique())
 multi = df[df["source_count"] > 1]
 col4.metric("Confirmés par 2+ sources", len(multi), help="Même trade trouvé dans plusieurs bases")
+
+st.divider()
+
+# --- Most active politicians quick overview ---
+st.subheader("🏅 Élus les plus actifs")
+overview = (
+    df.groupby(["politician", "party", "chamber", "state"])
+    .agg(
+        trades=("id", "count"),
+        volume=("amount_mid", "sum"),
+        last_trade=("trade_date", "max"),
+        tickers=("ticker", lambda x: x[x != ""].nunique()),
+    )
+    .reset_index()
+    .sort_values("trades", ascending=False)
+    .head(30)
+)
+overview["party_label"] = overview["party"].map(
+    {"D": "Dem.", "Democrat": "Dem.", "R": "Rép.", "Republican": "Rép.", "I": "Ind."}
+).fillna(overview["party"])
+st.dataframe(
+    overview[["politician", "party_label", "chamber", "state", "trades", "volume", "tickers", "last_trade"]],
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "politician": "Élu",
+        "party_label": "Parti",
+        "chamber": "Chambre",
+        "state": "État",
+        "trades": st.column_config.NumberColumn("# Trades", format="%d"),
+        "volume": st.column_config.NumberColumn("Volume estimé ($)", format="$%,.0f"),
+        "tickers": st.column_config.NumberColumn("Tickers distincts", format="%d"),
+        "last_trade": "Dernier trade",
+    },
+)
 
 st.divider()
 
@@ -259,6 +305,106 @@ if "trade_date" in filtered.columns:
                    color_discrete_map={"buy": "#2ecc71", "sell": "#e74c3c"},
                    labels={"trade_date": "Mois", "count": "Nombre de trades", "trade_type": "Type"})
     st.plotly_chart(fig4, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════
+# PORTEFEUILLE PAR ÉLU
+# ═══════════════════════════════════════════════════════════
+st.divider()
+st.header("🗂 Portefeuille par élu")
+
+politicians_with_trades = sorted(df[df["ticker"] != ""]["politician"].unique())
+selected_pol = st.selectbox("Choisir un élu", [""] + list(politicians_with_trades), key="pol_select")
+
+if selected_pol:
+    pol_df = df[(df["politician"] == selected_pol) & (df["ticker"] != "")].copy()
+
+    # Aggregate per ticker: buys vs sells, amounts, last trade
+    port = (
+        pol_df.groupby("ticker").agg(
+            asset_name=("asset_name", "first"),
+            buys=("trade_type", lambda x: (x == "buy").sum()),
+            sells=("trade_type", lambda x: (x == "sell").sum()),
+            buy_vol=("amount_mid", lambda x: x[pol_df.loc[x.index, "trade_type"] == "buy"].sum()),
+            sell_vol=("amount_mid", lambda x: x[pol_df.loc[x.index, "trade_type"] == "sell"].sum()),
+            last_trade=("trade_date", "max"),
+        ).reset_index()
+    )
+    port["net_position"] = port["buy_vol"] - port["sell_vol"]
+    port["statut"] = port.apply(
+        lambda r: "Actif (achat net)" if r["net_position"] > 0 else ("Sorti (vente net)" if r["net_position"] < 0 else "Neutre"),
+        axis=1
+    )
+
+    # Join latest prices + volume
+    latest_prices = load_prices()
+    if not latest_prices.empty:
+        port = port.merge(
+            latest_prices[["ticker", "price", "change_pct", "volume", "avg_volume"]].rename(
+                columns={"change_pct": "variation_%"}
+            ),
+            on="ticker", how="left"
+        )
+        port["market_cap_traded"] = (port["price"].fillna(0) * port["buy_vol"].fillna(0) / port["price"].fillna(1)).round(0)
+    else:
+        port[["price", "variation_%", "volume", "avg_volume"]] = None
+
+    # KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Positions distinctes", port["ticker"].nunique())
+    c2.metric("Total achat estimé", f"${port['buy_vol'].sum():,.0f}")
+    c3.metric("Total vente estimé", f"${port['sell_vol'].sum():,.0f}")
+    active_count = (port["net_position"] > 0).sum()
+    c4.metric("Positions actives (achat net)", active_count)
+
+    # Portfolio table
+    port_display = port[[
+        "ticker", "asset_name", "buys", "sells", "buy_vol", "sell_vol",
+        "net_position", "statut", "price", "variation_%", "volume", "avg_volume", "last_trade"
+    ]].sort_values("buy_vol", ascending=False)
+
+    st.dataframe(
+        port_display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "ticker": "Ticker",
+            "asset_name": "Actif",
+            "buys": st.column_config.NumberColumn("Achats", format="%d"),
+            "sells": st.column_config.NumberColumn("Ventes", format="%d"),
+            "buy_vol": st.column_config.NumberColumn("Vol. achat ($)", format="$%,.0f"),
+            "sell_vol": st.column_config.NumberColumn("Vol. vente ($)", format="$%,.0f"),
+            "net_position": st.column_config.NumberColumn("Position nette ($)", format="$%,.0f"),
+            "statut": "Statut",
+            "price": st.column_config.NumberColumn("Prix actuel ($)", format="$%.2f"),
+            "variation_%": st.column_config.NumberColumn("Variation j.", format="%.2f%%"),
+            "volume": st.column_config.NumberColumn("Volume jour", format="%,d"),
+            "avg_volume": st.column_config.NumberColumn("Vol. moyen 3M", format="%,d"),
+            "last_trade": "Dernier trade",
+        }
+    )
+
+    # Bubble chart: positions active
+    active_port = port[port["net_position"] > 0].dropna(subset=["price"])
+    if not active_port.empty:
+        fig_port = px.scatter(
+            active_port,
+            x="variation_%", y="price",
+            size="buy_vol",
+            text="ticker",
+            color="net_position",
+            color_continuous_scale="Greens",
+            labels={"variation_%": "Variation jour (%)", "price": "Prix ($)", "buy_vol": "Vol. achat ($)"},
+            title=f"Positions actives de {selected_pol}",
+        )
+        fig_port.update_traces(textposition="top center")
+        st.plotly_chart(fig_port, use_container_width=True)
+
+    # Trade history for this politician
+    with st.expander(f"Historique complet ({len(pol_df)} trades)"):
+        hist = pol_df[["trade_date", "ticker", "asset_name", "trade_type", "amount_mid", "disclosed"]].copy()
+        hist["trade_type"] = hist["trade_type"].map({"buy": "🟢 Achat", "sell": "🔴 Vente", "exchange": "🔄"}).fillna(hist["trade_type"])
+        hist["amount_mid"] = hist["amount_mid"].apply(lambda x: f"${x:,}" if x > 0 else "N/A")
+        st.dataframe(hist.sort_values("trade_date", ascending=False), use_container_width=True, hide_index=True)
 
 # ═══════════════════════════════════════════════════════════
 # SUPER INVESTISSEURS — CROISEMENT
