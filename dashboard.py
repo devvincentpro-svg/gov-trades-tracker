@@ -53,6 +53,17 @@ def load_prices() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
+def load_ticker_info() -> pd.DataFrame:
+    conn = get_conn()
+    try:
+        df = pd.read_sql_query("SELECT * FROM ticker_info", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@st.cache_data(ttl=300)
 def load_log() -> pd.DataFrame:
     conn = get_conn()
     df = pd.read_sql_query(
@@ -151,6 +162,27 @@ with col_right:
     fig2 = px.pie(type_counts, names="Type", values="Nombre",
                   color="Type", color_discrete_map={"Achat": "#2ecc71", "Vente": "#e74c3c", "Échange": "#3498db"})
     st.plotly_chart(fig2, use_container_width=True)
+
+# --- Secteurs les plus tradés (via Finnhub) ---
+ticker_info = load_ticker_info()
+if not ticker_info.empty:
+    st.subheader("🏭 Secteurs les plus tradés (enrichissement Finnhub)")
+    merged_sectors = filtered.merge(ticker_info[["ticker", "sector"]], on="ticker", how="left")
+    sector_counts = (
+        merged_sectors[merged_sectors["sector"].notna() & (merged_sectors["sector"] != "")]
+        .groupby(["sector", "trade_type"])
+        .size()
+        .reset_index(name="count")
+    )
+    if not sector_counts.empty:
+        fig_s = px.bar(
+            sector_counts, x="sector", y="count", color="trade_type",
+            color_discrete_map={"buy": "#2ecc71", "sell": "#e74c3c", "exchange": "#3498db"},
+            barmode="stack",
+            labels={"sector": "Secteur", "count": "Trades", "trade_type": "Type"},
+        )
+        fig_s.update_layout(xaxis_tickangle=-35)
+        st.plotly_chart(fig_s, use_container_width=True)
 
 # --- Tickers les plus tradés ---
 st.subheader("🔥 Tickers les plus tradés")

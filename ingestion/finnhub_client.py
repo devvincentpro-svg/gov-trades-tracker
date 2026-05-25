@@ -1,52 +1,83 @@
 import requests
-from ingestion.normalizer import parse_amount, normalize_type, make_id, clean_ticker
-from database import upsert_trade, log_fetch
+from database import get_conn, log_fetch
 from config import FINNHUB_API_KEY
 
+# The congressional-trading endpoint requires a paid Finnhub plan.
+# On the free tier we use Finnhub to enrich tickers with sector/industry data.
 
-def fetch():
+
+def _get(path: str, **params):
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"https://finnhub.io/api/v1/{path}",
+            params={"token": FINNHUB_API_KEY, **params},
+            timeout=10,
+        )
+        if resp.status_code == 403:
+            return None  # endpoint not available on free tier
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+def enrich_tickers():
+    """Fetch sector/industry/name for each ticker we track and store in ticker_info table."""
     if not FINNHUB_API_KEY:
         return 0
 
-    try:
-        resp = requests.get(
-            "https://finnhub.io/api/v1/stock/congressional-trading",
-            params={"token": FINNHUB_API_KEY},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-    except Exception as e:
-        log_fetch("finnhub", 0, f"error: {e}")
-        return 0
+    conn = get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS ticker_info (
+            ticker      TEXT PRIMARY KEY,
+            name        TEXT,
+            sector      TEXT,
+            industry    TEXT,
+            country     TEXT,
+            market_cap  INTEGER,
+            updated_at  TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.commit()
+
+    tickers = conn.execute(
+        """SELECT DISTINCT ticker FROM trades
+           WHERE ticker != ''
+           AND ticker NOT IN (SELECT ticker FROM ticker_info)
+           LIMIT 30"""
+    ).fetchall()
+    conn.close()
 
     count = 0
-    for row in data:
-        ticker = clean_ticker(row.get("symbol", ""))
-        politician = row.get("name", "").strip()
-        trade_date = row.get("transactionDate", "")
-        trade_type = normalize_type(row.get("transactionType", ""))
-        amount_low, amount_high = parse_amount(row.get("amount", ""))
+    for (ticker,) in tickers:
+        data = _get("stock/profile2", symbol=ticker)
+        if not data or not data.get("name"):
+            continue
 
-        chamber = "senate" if row.get("chamber", "").lower() == "senate" else "house"
-
-        trade = {
-            "id": make_id(politician, ticker, trade_date, trade_type),
-            "politician": politician,
-            "chamber": chamber,
-            "party": row.get("party", ""),
-            "state": row.get("state", ""),
-            "ticker": ticker,
-            "asset_name": row.get("assetDescription", ""),
-            "trade_type": trade_type,
-            "trade_date": trade_date,
-            "disclosed": row.get("filingDate", ""),
-            "amount_low": amount_low,
-            "amount_high": amount_high,
-            "sources": "finnhub",
-        }
-        upsert_trade(trade)
+        conn = get_conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO ticker_info
+               (ticker, name, sector, industry, country, market_cap)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                ticker,
+                data.get("name", ""),
+                data.get("finnhubIndustry", ""),
+                data.get("finnhubIndustry", ""),
+                data.get("country", ""),
+                int(data.get("marketCapitalization", 0) or 0),
+            ),
+        )
+        conn.commit()
+        conn.close()
         count += 1
 
-    log_fetch("finnhub", count, "ok")
+    log_fetch("finnhub_enrich", count, "ok")
     return count
+
+
+def fetch() -> int:
+    """Compatibility stub — enrich tickers instead of fetching trades."""
+    return enrich_tickers()
